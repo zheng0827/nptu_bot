@@ -9,6 +9,16 @@ from core.base_adapter import BaseNptuAdapter, NPTUError, TempDataDumper
 from core.storage import BotStorage
 
 
+_EMPTY_DATA_ERROR_CODES = {"310"}
+_EMPTY_DATA_ERRORS = {"student_data_not_fount_error", "student_data_not_found_error"}
+
+
+def _is_not_found_error(err_data: dict[str, Any]) -> bool:
+    code = str(err_data.get("errorCode") or "").strip()
+    err_name = str(err_data.get("error") or "").strip().lower()
+    return (not code) or (code in _EMPTY_DATA_ERROR_CODES) or (err_name in _EMPTY_DATA_ERRORS)
+
+
 def _extract_data_list(payload: Any) -> list[dict[str, Any]]:
     """Safely extract list data from NPTU API responses without crashing on empty results."""
     if isinstance(payload, list):
@@ -19,11 +29,10 @@ def _extract_data_list(payload: Any) -> list[dict[str, Any]]:
             return [item for item in data if isinstance(item, dict)]
         if payload.get("result") is False:
             err_data = data if isinstance(data, dict) else {}
-            code = str(err_data.get("errorCode") or "")
-            # Empty result codes or empty data should return [] gracefully
-            if not code:
+            if _is_not_found_error(err_data):
                 return []
-            desc = str(err_data.get("errorDescription") or "")
+            code = str(err_data.get("errorCode") or "unknown")
+            desc = str(err_data.get("errorDescription") or payload.get("reason") or "")
             raise NPTUError(f"屏大 API 回傳錯誤 (errorCode={code})：{desc}")
     return []
 
@@ -33,11 +42,11 @@ def _extract_data_any(payload: Any) -> Any:
     if isinstance(payload, dict):
         if payload.get("result") is False:
             err_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-            code = str(err_data.get("errorCode") or "")
-            if code:
-                desc = str(err_data.get("errorDescription") or "")
-                raise NPTUError(f"屏大 API 回傳錯誤 (errorCode={code})：{desc}")
-            return None
+            if _is_not_found_error(err_data):
+                return None
+            code = str(err_data.get("errorCode") or "unknown")
+            desc = str(err_data.get("errorDescription") or payload.get("reason") or "")
+            raise NPTUError(f"屏大 API 回傳錯誤 (errorCode={code})：{desc}")
         if "data" in payload:
             return payload["data"]
     return payload

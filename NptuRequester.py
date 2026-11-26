@@ -150,14 +150,30 @@ class NptuRequester:
             ttl=600,
         )
 
+    @staticmethod
+    def _pick_default_semester(semesters: list[dict[str, Any]]) -> dict[str, Any]:
+        for sem in semesters:
+            if str(sem.get("default") or "").strip().lower() == "yes":
+                return sem
+        for sem in semesters:
+            if str(sem.get("default_PHASE") or "-1") not in {"-1", "0", ""}:
+                return sem
+        return semesters[0]
+
+    @staticmethod
+    def _format_term_label(year: str, term: str) -> str:
+        if str(term) == "3":
+            return f"{year} 學年暑期"
+        return f"{year} 學年第 {term} 學期"
+
     async def get_latest_semester(self, source: str | None = None) -> tuple[str, str, str]:
         semesters = await self.get_semesters(source=source)
         if not semesters:
             raise NPTUError("找不到任何學期資料。")
-        first = semesters[0]
-        year = str(first.get("syear") or "")
-        term = str(first.get("seme") or "1")
-        phase = str(first.get("default_PHASE") or "4")
+        current = self._pick_default_semester(semesters)
+        year = str(current.get("syear") or "")
+        term = str(current.get("seme") or "1")
+        phase = str(current.get("default_PHASE") or "4")
         if phase in {"-1", "0", ""}:
             phase = "1"
         return year, term, phase
@@ -175,14 +191,15 @@ class NptuRequester:
 
         if scope == "term":
             if year and term:
-                return [(str(year), str(term))], f"{year} 學年第 {term} 學期"
+                return [(str(year), str(term))], self._format_term_label(str(year), str(term))
             latest_y, latest_t, _ = await self.get_latest_semester(source=source)
             y = str(year or latest_y)
             t = str(term or latest_t)
-            return [(y, t)], f"{y} 學年第 {t} 學期"
+            return [(y, t)], self._format_term_label(y, t)
 
         if scope == "year":
-            target_year = str(year or semesters[0].get("syear"))
+            default_sem = self._pick_default_semester(semesters) if semesters else {}
+            target_year = str(year or default_sem.get("syear") or "")
             pairs = [
                 (str(s.get("syear")), str(s.get("seme")))
                 for s in semesters
