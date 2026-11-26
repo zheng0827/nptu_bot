@@ -51,50 +51,128 @@ class CourseSearchModal(discord.ui.Modal, title="📚 免登入全校課程查�
             )
 
 
+class CourseDetailView(discord.ui.View):
+    """View shown when inspecting a single course's syllabus/detail, with Back to list."""
+
+    def __init__(
+        self,
+        requester: NptuRequester,
+        result: dict[str, Any],
+        page: int,
+        on_back: BackCallback | None = None,
+    ):
+        super().__init__(timeout=300)
+        self.requester = requester
+        self.result = result
+        self.page = page
+        self.on_back = on_back
+
+    @discord.ui.button(label="⬅️ 返回課程列表", style=discord.ButtonStyle.primary)
+    async def btn_back_list(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        view = CourseQueryView(self.requester, self.result, page=self.page, on_back=self.on_back)
+        await interaction.response.edit_message(
+            embed=build_public_courses_embed(self.result, page=self.page),
+            view=view,
+        )
+
+    @discord.ui.button(label="🔍 重新搜尋", style=discord.ButtonStyle.secondary)
+    async def btn_search(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        await interaction.response.send_modal(CourseSearchModal(self.requester, on_back=self.on_back))
+
+    @discord.ui.button(label="🏠 返回主控台", style=discord.ButtonStyle.secondary)
+    async def btn_home(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if self.on_back:
+            await self.on_back(interaction)
+        else:
+            await interaction.response.defer()
+
+
 class CourseQueryView(discord.ui.View):
-    """Paginated public course results with syllabus lookup."""
+    """Paginated public course container with a quick-lookup detail button for each displayed course."""
+
+    PAGE_SIZE = 5
 
     def __init__(
         self,
         requester: NptuRequester,
         result: dict[str, Any] | None = None,
+        page: int = 0,
         on_back: BackCallback | None = None,
     ):
         super().__init__(timeout=300)
         self.requester = requester
         self.result = result
         self.on_back = on_back
-        self.page = 0
+        self.page = page
+        self._build_course_buttons()
 
-    @discord.ui.button(label="🔍 搜尋課程", style=discord.ButtonStyle.primary)
+    def _build_course_buttons(self) -> None:
+        if not self.result:
+            return
+        courses = self.result.get("courses") or []
+        start = self.page * self.PAGE_SIZE
+        chunk = courses[start : start + self.PAGE_SIZE]
+        for idx, course in enumerate(chunk, start=1):
+            name = str(course.get("subj_CNAME") or course.get("subj_CN") or f"課程{idx}").strip()
+            open_id = str(course.get("open_ID") or course.get("plan_OPEN_ID") or "").strip()
+            if not open_id:
+                continue
+            short_label = f"{idx}. {name}"
+            if len(short_label) > 22:
+                short_label = short_label[:21] + "…"
+            btn = discord.ui.Button(
+                label=short_label,
+                style=discord.ButtonStyle.success,
+                row=0,
+            )
+
+            async def _make_cb(interaction: discord.Interaction, oid: str = open_id, cname: str = name) -> None:
+                await interaction.response.defer()
+                try:
+                    detail = await self.requester.get_course_detail(oid)
+                    embed = build_generic_personal_embed(f"📄 課程資訊與大綱 — {cname} ({oid})", detail, "查無課程詳細大綱。")
+                    detail_view = CourseDetailView(self.requester, self.result, self.page, on_back=self.on_back)
+                    await interaction.edit_original_response(embed=embed, view=detail_view, attachments=[])
+                except Exception as exc:
+                    await interaction.edit_original_response(
+                        embed=discord.Embed(title="❌ 查詢課程詳情失敗", description=str(exc), color=0xE74C3C),
+                        view=self,
+                    )
+
+            btn.callback = _make_cb
+            self.add_item(btn)
+
+    @discord.ui.button(label="🔍 搜尋課程", style=discord.ButtonStyle.primary, row=1)
     async def btn_search(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.send_modal(CourseSearchModal(self.requester, on_back=self.on_back))
 
-    @discord.ui.button(label="◀ 上頁", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="◀ 上頁", style=discord.ButtonStyle.secondary, row=1)
     async def btn_prev(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if self.result and self.page > 0:
-            self.page -= 1
+            new_page = self.page - 1
+            new_view = CourseQueryView(self.requester, self.result, page=new_page, on_back=self.on_back)
             await interaction.response.edit_message(
-                embed=build_public_courses_embed(self.result, page=self.page),
-                view=self,
+                embed=build_public_courses_embed(self.result, page=new_page),
+                view=new_view,
             )
         else:
             await interaction.response.defer()
 
-    @discord.ui.button(label="下頁 ▶", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="下頁 ▶", style=discord.ButtonStyle.secondary, row=1)
     async def btn_next(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if self.result:
             total = len(self.result.get("courses") or [])
-            if (self.page + 1) * 8 < total:
-                self.page += 1
+            if (self.page + 1) * self.PAGE_SIZE < total:
+                new_page = self.page + 1
+                new_view = CourseQueryView(self.requester, self.result, page=new_page, on_back=self.on_back)
                 await interaction.response.edit_message(
-                    embed=build_public_courses_embed(self.result, page=self.page),
-                    view=self,
+                    embed=build_public_courses_embed(self.result, page=new_page),
+                    view=new_view,
                 )
                 return
         await interaction.response.defer()
 
-    @discord.ui.button(label="🏠 返回主控台", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="🏠 返回主控台", style=discord.ButtonStyle.secondary, row=1)
     async def btn_back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if self.on_back:
             await self.on_back(interaction)

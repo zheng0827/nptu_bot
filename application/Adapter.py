@@ -110,7 +110,12 @@ class ApplicationAdapter(BaseNptuAdapter):
         if status:
             params["status"] = status
         payload = await self.client.request("student_leave_list", params)
-        return _extract_data_list(payload)
+        unwrapped = _extract_data_any(payload)
+        if isinstance(unwrapped, dict) and isinstance(unwrapped.get("leaveList"), list):
+            return [item for item in unwrapped["leaveList"] if isinstance(item, dict)]
+        if isinstance(unwrapped, list):
+            return [item for item in unwrapped if isinstance(item, dict)]
+        return []
 
     async def get_leave_ask_list(self, status: str = "A") -> list[dict[str, Any]]:
         payload = await self.client.request("student_leave_ask_list", {"status": status})

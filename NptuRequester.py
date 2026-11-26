@@ -22,59 +22,74 @@ AttendanceFilter = Literal["all", "leave", "absent"]
 
 
 def _is_absent_record(rec: dict[str, Any]) -> bool:
-    """Heuristic classifier distinguishing 曠課 (unexcused absence) from 請假 (leave)."""
+    """Classifier distinguishing 曠課 (unexcused absence) from 請假 (leave) using real NPTU fields."""
+    if str(rec.get("cutclass_ID") or "").strip() or str(rec.get("cutclass_TXT") or "").strip():
+        return True
     combined = " ".join(
         str(rec.get(k) or "")
-        for k in ("excuse_NAME", "EXCUSE_NAME", "leave_NAME", "type_NAME", "status_TXT", "EXCUSE_ID", "status")
+        for k in (
+            "excuse_TXT",
+            "filter_TXT",
+            "excuse_NAME",
+            "EXCUSE_NAME",
+            "leave_NAME",
+            "type_NAME",
+            "status_TXT",
+            "EXCUSE_ID",
+            "status",
+        )
     )
     return "曠" in combined or "缺席" in combined
 
 
-def _merge_stat_dicts(items: list[Any]) -> dict[str, float]:
-    """Aggregate numeric fields across multiple semester leave-statistics payloads."""
-    totals: dict[str, float] = {}
+def _safe_float(val: Any) -> float:
+    try:
+        return float(str(val).strip())
+    except (TypeError, ValueError):
+        return 0.0
 
-    def _accumulate(obj: Any) -> None:
-        if isinstance(obj, list):
-            for entry in obj:
-                _accumulate(entry)
-        elif isinstance(obj, dict):
-            # Pattern A: {"name": "病假", "count": 2} or {"excuse_NAME": "事假", "hours": 3}
-            label_key = next(
-                (k for k in ("excuse_NAME", "EXCUSE_NAME", "leave_NAME", "name", "type", "title", "KIND_NAME") if k in obj),
-                None,
-            )
-            value_key = next(
-                (k for k in ("count", "hours", "total", "QTY", "qty", "CNT", "cnt", "num", "value") if k in obj),
-                None,
-            )
-            if label_key and value_key:
-                label = str(obj[label_key]).strip()
-                try:
-                    val = float(str(obj[value_key]).strip())
-                except (TypeError, ValueError):
-                    val = 0.0
-                if label:
-                    totals[label] = totals.get(label, 0.0) + val
-                return
 
-            # Pattern B: flat dict of {"病假": 2, "曠課": 1, ...}
-            for k, v in obj.items():
-                if k.lower() in {"syear", "seme", "year", "term", "studentid", "std_id"}:
-                    continue
-                if isinstance(v, (int, float)):
-                    totals[k] = totals.get(k, 0.0) + float(v)
-                elif isinstance(v, str):
-                    try:
-                        totals[k] = totals.get(k, 0.0) + float(v.strip())
-                    except ValueError:
-                        pass
-                elif isinstance(v, (dict, list)):
-                    _accumulate(v)
+def _merge_stat_dicts(items: list[Any]) -> tuple[dict[str, float], list[dict[str, Any]]]:
+    """Aggregate real student_leave_statistics course records into totals and per-course rows."""
+    total_leave = 0.0
+    total_abwol = 0.0
+    total_hours = 0.0
+    course_rows: list[dict[str, Any]] = []
 
     for item in items:
-        _accumulate(item)
-    return totals
+        if not isinstance(item, list):
+            continue
+        for entry in item:
+            if not isinstance(entry, dict):
+                continue
+            leave_h = _safe_float(entry.get("leave_HOURS"))
+            abwol_h = _safe_float(entry.get("abwol_HOURS"))
+            subj_h = _safe_float(entry.get("subj_TOTAL_HOURS"))
+            total_leave += leave_h
+            total_abwol += abwol_h
+            total_hours += subj_h
+            course_rows.append(
+                {
+                    "syear": str(entry.get("syear") or ""),
+                    "seme": str(entry.get("seme") or ""),
+                    "subj_CNAME": str(entry.get("subj_CNAME") or entry.get("subj_ID") or "未命名科目"),
+                    "subj_ID": str(entry.get("subj_ID") or ""),
+                    "leave_HOURS": leave_h,
+                    "abwol_HOURS": abwol_h,
+                    "subj_TOTAL_HOURS": subj_h,
+                    "deduct_TXT": str(entry.get("deduct_TXT") or "").strip(),
+                }
+            )
+
+    totals: dict[str, float] = {}
+    if course_rows:
+        totals = {
+            "請假總節數": total_leave,
+            "曠課總節數": total_abwol,
+            "缺曠合計節數": total_leave + total_abwol,
+            "統計課程數": float(len(course_rows)),
+        }
+    return totals, course_rows
 
 
 class NptuRequester:
@@ -253,12 +268,13 @@ class NptuRequester:
                 raw_items.append({"year": y, "term": t, "data": data})
                 raw_payloads.append(data)
 
-        totals = _merge_stat_dicts(raw_payloads)
+        totals, course_rows = _merge_stat_dicts(raw_payloads)
         return {
             "scope": scope,
             "label": label,
             "semesters": pairs,
             "totals": totals,
+            "courses": course_rows,
             "raw_by_semester": raw_items,
         }
 
@@ -749,12 +765,13 @@ class NptuRequester:
         for idx, rec in enumerate(records):
             key = "|".join(
                 str(rec.get(k) or "")
-                for k in ("EXCUSE_DT", "excuse_DT", "LESSON_ID", "lesson_ID", "EXCUSE_ID", "excuse_ID", "FILE_PK")
+                for k in ("excuse_DT", "EXCUSE_DT", "lesson_ID", "LESSON_ID", "excuse_ID", "EXCUSE_ID", "open_ID", "FILE_PK")
             ).strip("|")
             if not key:
                 key = f"row_{idx}"
             status_val = str(
-                rec.get("status_TXT")
+                rec.get("check_M_TXT")
+                or rec.get("status_TXT")
                 or rec.get("STATUS_TXT")
                 or rec.get("verify_TXT")
                 or rec.get("status")

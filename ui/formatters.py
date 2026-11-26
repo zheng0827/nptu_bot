@@ -71,14 +71,21 @@ def build_scores_embed(result: Mapping[str, Any], profile: Mapping[str, Any]) ->
     avg_text = f"**{summary.weighted_score_avg:.2f}**" if summary.weighted_score_avg is not None else "-"
     dist_parts = [f"{g}:{summary.grade_counts.get(g, 0)}" for g in ("A", "B", "C", "D", "E", "X")]
 
+    desc_lines = [
+        f"• **屏大 4.0 GPA**：{gpa_text}",
+        f"• **加權平均**：{avg_text}",
+        f"• **學分**：實得 `{summary.earned_credits:g}` / 修習 `{summary.attempted_credits:g}`（共 `{summary.total_courses}` 門）",
+        f"• **等第分布**：`{' | '.join(dist_parts)}`",
+    ]
+    # Include official ranking & conduct summary (sco_AVG) when available
+    if records:
+        sco_avg = str(records[0].get("sco_AVG") or "").strip()
+        if sco_avg and result.get("scope") == "term":
+            desc_lines.append(f"• **官方統計與排名**：{sco_avg}")
+
     embed = discord.Embed(
         title=f"🎓 成績統計 — {label}",
-        description=(
-            f"• **屏大 4.0 GPA**：{gpa_text}\n"
-            f"• **加權平均**：{avg_text}\n"
-            f"• **學分**：實得 `{summary.earned_credits:g}` / 修習 `{summary.attempted_credits:g}`（共 `{summary.total_courses}` 門）\n"
-            f"• **等第分布**：`{' | '.join(dist_parts)}`"
-        ),
+        description="\n".join(desc_lines),
         color=COLOR_PRIMARY,
     )
     student_name = _pick(profile, "std_CNAME", default="")
@@ -94,23 +101,38 @@ def build_scores_embed(result: Mapping[str, Any], profile: Mapping[str, Any]) ->
         subj = _pick(rec, "subj_CN", "subj_CNAME", default="未命名科目")
         subj_id = _pick(rec, "subj_ID", default="")
         raw_score = rec.get("score")
+        score_txt = str(rec.get("score_TXT") or "").strip()
         grade = score_to_grade(raw_score)
-        grade_tag = f"{grade.letter} ({grade.grade_point:.1f})" if grade else "-"
-        score_str = str(raw_score).strip() if raw_score not in (None, "") else "尚未結算"
+        if score_txt:
+            score_display = f"{score_txt}({grade.letter})" if grade else score_txt
+        elif raw_score not in (None, ""):
+            raw_clean = str(raw_score).strip()
+            if raw_clean.endswith(".0"):
+                raw_clean = raw_clean[:-2]
+            score_display = f"{raw_clean}({grade.letter})" if grade else raw_clean
+        else:
+            score_display = "尚未結算"
+
         credits = _pick(rec, "credits", default="-")
-        pass_txt = _pick(rec, "pass_TXT", default="-")
+        if credits.endswith(".0"):
+            credits = credits[:-2]
+        course_type = _pick(rec, "course_CNAME", default="")
+        must_txt = _pick(rec, "must_TXT", default="")
+        cat_txt = f"{course_type}/{must_txt}" if course_type != "-" and must_txt != "-" else ""
         term_tag = f"{rec.get('_year', '')}-{rec.get('_term', '')} " if result.get("scope") != "term" else ""
+
+        val_line = f"成績：`{score_display}`\n學分：`{credits}`"
+        if cat_txt:
+            val_line += f" | `{cat_txt}`"
 
         embed.add_field(
             name=_truncate(f"📘 {term_tag}{subj} ({subj_id})", 200),
-            value=f"分數：`{score_str}` | 等第：`{grade_tag}`\n學分：`{credits}` | 狀態：`{pass_txt}`",
+            value=val_line,
             inline=True,
         )
 
     if len(records) > 18:
         embed.set_footer(text=f"僅顯示前 18 筆（共 {len(records)} 筆）；完整資料可於 temp_data/ 查看")
-    else:
-        embed.set_footer(text="等第標準：A(80~100)=4.0 | B(70~79)=3.0 | C(60~69)=2.0 | D(50~59)=1.0 | E/X=0")
     return embed
 
 
@@ -151,6 +173,7 @@ def build_score_trend_embed(result: Mapping[str, Any], profile: Mapping[str, Any
 
 def build_attendance_stats_embed(result: Mapping[str, Any]) -> discord.Embed:
     totals: Mapping[str, float] = result.get("totals") or {}
+    courses: Sequence[Mapping[str, Any]] = result.get("courses") or []
     embed = discord.Embed(
         title=f"📊 缺曠課統計 — {result['label']}",
         color=COLOR_WARNING,
@@ -159,12 +182,27 @@ def build_attendance_stats_embed(result: Mapping[str, Any]) -> discord.Embed:
         lines = [f"• **{k}**：`{v:g}`" for k, v in totals.items()]
         embed.description = _truncate("\n".join(lines), 3800)
     else:
-        raw_list = result.get("raw_by_semester") or []
-        if raw_list:
-            preview = "\n".join(_format_generic_item(r.get("data")) for r in raw_list[:8])
-            embed.description = _truncate(f"原始統計資料：\n```\n{preview}\n```", 3800)
-        else:
-            embed.description = "📭 此範圍內查無缺曠課統計紀錄。"
+        embed.description = "📭 此範圍內查無缺曠課統計紀錄。"
+
+    if courses:
+        # Sort so courses with leave or absence appear first
+        ordered = sorted(
+            courses,
+            key=lambda c: (float(c.get("abwol_HOURS", 0)) + float(c.get("leave_HOURS", 0))),
+            reverse=True,
+        )
+        c_lines: list[str] = []
+        for c in ordered[:15]:
+            sem_tag = f"[{c.get('syear', '')}-{c.get('seme', '')}] " if result.get("scope") != "term" else ""
+            lh = float(c.get("leave_HOURS", 0))
+            ah = float(c.get("abwol_HOURS", 0))
+            th = float(c.get("subj_TOTAL_HOURS", 0))
+            warn = " ⚠️" if ah > 0 else ""
+            c_lines.append(
+                f"• {sem_tag}**{c.get('subj_CNAME', '-')}**：請假 `{lh:g}` 節｜曠課 `{ah:g}` 節（總時數 `{th:g}`）{warn}"
+            )
+        embed.add_field(name="📚 各科缺曠明細", value=_truncate("\n".join(c_lines), 1000), inline=False)
+
     embed.set_footer(text=f"涵蓋學期數：{len(result.get('semesters', []))} | 原始結構已存至 temp_data/")
     return embed
 
@@ -185,15 +223,17 @@ def build_attendance_records_embed(result: Mapping[str, Any], page: int = 0, pag
     else:
         lines: list[str] = []
         for idx, rec in enumerate(chunk, start=page * page_size + 1):
-            dt = _pick(rec, "EXCUSE_DT", "excuse_DT", "date", "DATE", default="")
-            kind = _pick(rec, "excuse_NAME", "EXCUSE_NAME", "leave_NAME", "EXCUSE_ID", default="")
-            lesson = _pick(rec, "LESSON_ID", "lesson_ID", "lesson", default="")
-            status = _pick(rec, "status_TXT", "STATUS_TXT", "verify_TXT", "status", default="")
-            reason = _pick(rec, "REASON", "reason", default="")
+            dt = _pick(rec, "excuse_DT", "EXCUSE_DT", "date", "DATE", default="")
+            kind = _pick(rec, "excuse_TXT", "cutclass_TXT", "filter_TXT", "excuse_NAME", "EXCUSE_ID", default="")
+            subj = _pick(rec, "subj_CN", "subj_CNAME", default="")
+            lesson = _pick(rec, "lesson_ID", "LESSON_ID", "lesson", default="")
+            status = _pick(rec, "check_M_TXT", "status_TXT", "STATUS_TXT", "verify_TXT", default="")
+            reason = _pick(rec, "reason", "REASON", default="")
             if dt != "-" or kind != "-":
-                line = f"**{idx}.** `{dt}` | {kind} | 節次 `{lesson}` | 狀態：{status}"
+                subj_part = f"｜{subj}" if subj and subj != "-" else ""
+                line = f"**{idx}.** `{dt}`｜**{kind}**{subj_part}｜節次 `{lesson}`｜{status}"
                 if reason and reason != "-":
-                    line += f"\n　事由：{_truncate(reason, 60)}"
+                    line += f"\n　事由：{_truncate(reason, 70)}"
             else:
                 line = f"**{idx}.** {_truncate(_format_generic_item(rec), 140)}"
             lines.append(line)
@@ -316,7 +356,20 @@ def build_generic_personal_embed(title: str, data: Any, empty_msg: str) -> disco
     return embed
 
 
-def build_public_courses_embed(result: Mapping[str, Any], page: int = 0, page_size: int = 8) -> discord.Embed:
+def _format_course_time(course: Mapping[str, Any]) -> str:
+    week_raw = str(course.get("week_CNAME") or course.get("week_ID") or "").strip().strip("[]")
+    lesson_raw = str(course.get("lesson_CNAME") or course.get("lesson_ID") or "").strip()
+    if week_raw:
+        week_parts = [WEEK_MAP.get(w.strip(), f"週{w.strip()}") for w in week_raw.split(",") if w.strip()]
+        week_txt = "/".join(week_parts)
+    else:
+        week_txt = ""
+    if week_txt and lesson_raw:
+        return f"{week_txt} {lesson_raw}"
+    return week_txt or lesson_raw or _pick(course, "time_TXT", "TIME_TXT", default="-")
+
+
+def build_public_courses_embed(result: Mapping[str, Any], page: int = 0, page_size: int = 5) -> discord.Embed:
     courses: Sequence[Mapping[str, Any]] = result.get("courses") or []
     total_pages = max(1, (len(courses) + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
@@ -324,24 +377,37 @@ def build_public_courses_embed(result: Mapping[str, Any], page: int = 0, page_si
 
     embed = discord.Embed(
         title=f"📚 全校課程查詢 — {result['year']} 學年第 {result['term']} 學期",
+        description="點擊下方對應課程按鈕即可快速檢視該課程完整資訊與大綱。",
         color=COLOR_PUBLIC,
     )
     if not chunk:
         embed.description = "📭 查無符合條件的課程。"
     else:
-        for c in chunk:
+        for idx, c in enumerate(chunk, start=1):
             name = _pick(c, "subj_CNAME", "subj_CN", "SUBJ_CNAME", default="未命名課程")
-            teacher = _pick(c, "teacher_CNAME", "TEACHER_CNAME", "teacherName", default="-")
+            teacher = _pick(c, "emp_CNAME", "teacher_CNAME", "TEACHER_CNAME", "teacherName", default="-")
             room = _pick(c, "room_CNAME", "ROOM_CNAME", default="-")
-            time_txt = _pick(c, "time_TXT", "TIME_TXT", "week_ID", default="-")
+            time_txt = _format_course_time(c)
             credits = _pick(c, "credits", "CREDITS", default="-")
-            open_id = _pick(c, "plan_OPEN_ID", "open_ID", "OPEN_ID", default="")
+            if credits.endswith(".0"):
+                credits = credits[:-2]
+            dept = _pick(c, "show_CLASS", default="")
+            must = _pick(c, "must_TXT", default="")
+            stds_y = _pick(c, "stds_Y", default="")
+            std_max = _pick(c, "std_MAX", default="")
+            cap = f"｜人數：`{stds_y}/{std_max}`" if stds_y != "-" and std_max != "-" else ""
+            meta = f"（{dept}・{must}）" if dept != "-" and must != "-" else ""
+            open_id = _pick(c, "open_ID", "plan_OPEN_ID", "OPEN_ID", default="")
             embed.add_field(
-                name=_truncate(f"📖 {name}", 200),
-                value=f"教師：`{teacher}` | 學分：`{credits}`\n時間：`{time_txt}` | 教室：`{room}`\n代碼：`{open_id}`",
+                name=_truncate(f"{idx}. 📖 {name} {meta}", 200),
+                value=(
+                    f"教師：`{teacher}`｜學分：`{credits}`{cap}\n"
+                    f"時間：`{time_txt}`｜教室：`{room}`\n"
+                    f"代碼：`{open_id}`"
+                ),
                 inline=False,
             )
-    embed.set_footer(text=f"第 {page + 1}/{total_pages} 頁（共 {len(courses)} 筆）| 免登入公開資料")
+    embed.set_footer(text=f"第 {page + 1}/{total_pages} 頁（共 {len(courses)} 筆）｜免登入公開資料")
     return embed
 
 

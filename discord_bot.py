@@ -347,9 +347,21 @@ class NptuBot(discord.Client):
             term: str | None = None,
             open_id: str = "",
         ) -> None:
+            panel = MainPanelView(self.requester, self.owner_id)
+            if not any([subject_name.strip(), teacher_name.strip(), week_id.strip(), open_id.strip(), year, term]):
+                embed = discord.Embed(
+                    title="📚 屏大全校課程查詢（免登入）",
+                    description="點擊下方 **🔍 搜尋課程** 按鈕輸入關鍵字（課名、教師、星期、學期），查詢結果的每堂課程都會附上快速詳情按鈕。",
+                    color=0x1ABC9C,
+                )
+                await interaction.response.send_message(
+                    embed=embed,
+                    view=CourseQueryView(self.requester, on_back=panel.return_to_main),
+                )
+                return
+
             await interaction.response.defer()
             try:
-                panel = MainPanelView(self.requester, self.owner_id)
                 if open_id.strip():
                     detail = await self.requester.get_course_detail(open_id.strip())
                     embed = build_generic_personal_embed(f"📄 課程大綱（{open_id.strip()}）", detail, "查無課程大綱。")
@@ -362,7 +374,7 @@ class NptuBot(discord.Client):
                     teacherName=teacher_name,
                     weekID=week_id,
                 )
-                view = CourseQueryView(self.requester, res, on_back=panel.return_to_main)
+                view = CourseQueryView(self.requester, res, page=0, on_back=panel.return_to_main)
                 await interaction.followup.send(embed=build_public_courses_embed(res, page=0), view=view)
             except Exception as exc:
                 await interaction.followup.send(
