@@ -425,6 +425,10 @@ class NptuRequester:
             if sem_summary.weighted_score_avg is None:
                 continue
             label = f"{y}-暑" if t == "3" else f"{y}-{t}"
+            import re
+            sco_avg = str(rows[0].get("sco_AVG") or "")
+            m_rank = re.search(r"班級名次[：:]\s*([^\s]+)", sco_avg)
+            m_cond = re.search(r"操行成績[：:]\s*([^\s]+)", sco_avg)
             points.append(
                 {
                     "year": y,
@@ -434,6 +438,8 @@ class NptuRequester:
                     "gpa": sem_summary.gpa,
                     "credits": sem_summary.earned_credits,
                     "courses": sem_summary.graded_courses,
+                    "rank": m_rank.group(1).strip() if m_rank else "",
+                    "conduct": m_cond.group(1).strip() if m_cond else "",
                 }
             )
 

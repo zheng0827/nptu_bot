@@ -15,6 +15,7 @@ from ui.formatters import (
     build_attendance_records_embed,
     build_attendance_stats_embed,
     build_classroom_embed,
+    build_course_detail_embed,
     build_generic_personal_embed,
     build_leave_notify_embed,
     build_library_search_embed,
@@ -34,7 +35,7 @@ from ui.views_personal import (
     ScheduleView,
     ScoreView,
 )
-from ui.views_public import ClassroomView, CourseQueryView, LibraryView
+from ui.views_public import ClassroomView, CourseDetailView, CourseQueryView, LibraryView
 
 logger = logging.getLogger(__name__)
 
@@ -364,8 +365,9 @@ class NptuBot(discord.Client):
             try:
                 if open_id.strip():
                     detail = await self.requester.get_course_detail(open_id.strip())
-                    embed = build_generic_personal_embed(f"📄 課程大綱（{open_id.strip()}）", detail, "查無課程大綱。")
-                    await interaction.followup.send(embed=embed, view=CourseQueryView(self.requester, on_back=panel.return_to_main))
+                    embed = build_course_detail_embed(detail, show_syllabus=False)
+                    view = CourseDetailView(self.requester, detail, on_back=panel.return_to_main)
+                    await interaction.followup.send(embed=embed, view=view)
                     return
                 res = await self.requester.query_school_courses(
                     year=year,

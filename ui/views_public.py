@@ -8,6 +8,7 @@ import discord
 from NptuRequester import NptuRequester
 from ui.formatters import (
     build_classroom_embed,
+    build_course_detail_embed,
     build_generic_personal_embed,
     build_library_search_embed,
     build_public_courses_embed,
@@ -52,28 +53,43 @@ class CourseSearchModal(discord.ui.Modal, title="📚 免登入全校課程查�
 
 
 class CourseDetailView(discord.ui.View):
-    """View shown when inspecting a single course's syllabus/detail, with Back to list."""
+    """View shown when inspecting a single course's syllabus/detail, with Syllabus toggle & Back."""
 
     def __init__(
         self,
         requester: NptuRequester,
-        result: dict[str, Any],
-        page: int,
+        detail: Any,
+        result: dict[str, Any] | None = None,
+        page: int = 0,
         on_back: BackCallback | None = None,
+        show_syllabus: bool = False,
     ):
         super().__init__(timeout=300)
         self.requester = requester
+        self.detail = detail
         self.result = result
         self.page = page
         self.on_back = on_back
+        self.show_syllabus = show_syllabus
+
+    @discord.ui.button(label="📑 切換每週進度／課程簡介", style=discord.ButtonStyle.success)
+    async def btn_toggle_syllabus(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.show_syllabus = not self.show_syllabus
+        await interaction.response.edit_message(
+            embed=build_course_detail_embed(self.detail, show_syllabus=self.show_syllabus),
+            view=self,
+        )
 
     @discord.ui.button(label="⬅️ 返回課程列表", style=discord.ButtonStyle.primary)
     async def btn_back_list(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        view = CourseQueryView(self.requester, self.result, page=self.page, on_back=self.on_back)
-        await interaction.response.edit_message(
-            embed=build_public_courses_embed(self.result, page=self.page),
-            view=view,
-        )
+        if self.result:
+            view = CourseQueryView(self.requester, self.result, page=self.page, on_back=self.on_back)
+            await interaction.response.edit_message(
+                embed=build_public_courses_embed(self.result, page=self.page),
+                view=view,
+            )
+        else:
+            await interaction.response.send_modal(CourseSearchModal(self.requester, on_back=self.on_back))
 
     @discord.ui.button(label="🔍 重新搜尋", style=discord.ButtonStyle.secondary)
     async def btn_search(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -126,12 +142,18 @@ class CourseQueryView(discord.ui.View):
                 row=0,
             )
 
-            async def _make_cb(interaction: discord.Interaction, oid: str = open_id, cname: str = name) -> None:
+            async def _make_cb(interaction: discord.Interaction, oid: str = open_id) -> None:
                 await interaction.response.defer()
                 try:
                     detail = await self.requester.get_course_detail(oid)
-                    embed = build_generic_personal_embed(f"📄 課程資訊與大綱 — {cname} ({oid})", detail, "查無課程詳細大綱。")
-                    detail_view = CourseDetailView(self.requester, self.result, self.page, on_back=self.on_back)
+                    embed = build_course_detail_embed(detail, show_syllabus=False)
+                    detail_view = CourseDetailView(
+                        self.requester,
+                        detail,
+                        self.result,
+                        self.page,
+                        on_back=self.on_back,
+                    )
                     await interaction.edit_original_response(embed=embed, view=detail_view, attachments=[])
                 except Exception as exc:
                     await interaction.edit_original_response(

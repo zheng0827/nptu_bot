@@ -62,10 +62,30 @@ def build_main_panel_embed(profile: Mapping[str, Any], notify_enabled: bool, sou
     return embed
 
 
+def _parse_sco_avg(raw: str) -> dict[str, str]:
+    """Extract 班級名次 and 操行成績 from NPTU sco_AVG summary text."""
+    import re
+
+    out: dict[str, str] = {}
+    if not raw:
+        return out
+    m_rank = re.search(r"班級名次[：:]\s*([^\s]+)", raw)
+    if m_rank:
+        out["rank"] = m_rank.group(1).strip()
+    m_conduct = re.search(r"操行成績[：:]\s*([^\s]+)", raw)
+    if m_conduct:
+        out["conduct"] = m_conduct.group(1).strip()
+    m_avg = re.search(r"學業平均[：:]\s*([^\s]+)", raw)
+    if m_avg:
+        out["avg"] = m_avg.group(1).strip()
+    return out
+
+
 def build_scores_embed(result: Mapping[str, Any], profile: Mapping[str, Any]) -> discord.Embed:
     summary: ScoreSummary = result["summary"]
     records: Sequence[Mapping[str, Any]] = result["records"]
     label: str = result["label"]
+    scope: str = str(result.get("scope") or "term")
 
     gpa_text = f"**{summary.gpa:.2f}** / 4.00" if summary.gpa is not None else "尚無可採計成績"
     avg_text = f"**{summary.weighted_score_avg:.2f}**" if summary.weighted_score_avg is not None else "-"
@@ -77,15 +97,38 @@ def build_scores_embed(result: Mapping[str, Any], profile: Mapping[str, Any]) ->
         f"• **學分**：實得 `{summary.earned_credits:g}` / 修習 `{summary.attempted_credits:g}`（共 `{summary.total_courses}` 門）",
         f"• **等第分布**：`{' | '.join(dist_parts)}`",
     ]
-    # Include official ranking & conduct summary (sco_AVG) when available
-    if records:
-        sco_avg = str(records[0].get("sco_AVG") or "").strip()
-        if sco_avg and result.get("scope") == "term":
-            desc_lines.append(f"• **官方統計與排名**：{sco_avg}")
+
+    # Collect per-semester conduct & rank from sco_AVG
+    sem_meta: dict[tuple[str, str], dict[str, str]] = {}
+    for rec in records:
+        y = str(rec.get("_year") or rec.get("syear") or "").strip()
+        t = str(rec.get("_term") or rec.get("seme") or "").strip()
+        sco_avg = str(rec.get("sco_AVG") or "").strip()
+        if y and t and sco_avg and (y, t) not in sem_meta:
+            parsed = _parse_sco_avg(sco_avg)
+            if parsed:
+                sem_meta[(y, t)] = parsed
+
+    if scope != "term" and sem_meta:
+        def _sk(pair: tuple[str, str]) -> tuple[int, int]:
+            try:
+                return (int(pair[0]), int(pair[1]))
+            except ValueError:
+                return (0, 0)
+
+        conduct_parts: list[str] = []
+        for (y, t) in sorted(sem_meta.keys(), key=_sk):
+            info = sem_meta[(y, t)]
+            sem_lbl = f"{y}-暑" if t == "3" else f"{y}-{t}"
+            piece = f"`{sem_lbl}` 操行 **{info.get('conduct', '-')}**"
+            if info.get("rank"):
+                piece += f"（名次 {info['rank']}）"
+            conduct_parts.append(piece)
+        desc_lines.append("• **各學期操行**：" + " ｜ ".join(conduct_parts))
 
     embed = discord.Embed(
         title=f"🎓 成績統計 — {label}",
-        description="\n".join(desc_lines),
+        description=_truncate("\n".join(desc_lines), 3900),
         color=COLOR_PRIMARY,
     )
     student_name = _pick(profile, "std_CNAME", default="")
@@ -119,7 +162,7 @@ def build_scores_embed(result: Mapping[str, Any], profile: Mapping[str, Any]) ->
         course_type = _pick(rec, "course_CNAME", default="")
         must_txt = _pick(rec, "must_TXT", default="")
         cat_txt = f"{course_type}/{must_txt}" if course_type != "-" and must_txt != "-" else ""
-        term_tag = f"{rec.get('_year', '')}-{rec.get('_term', '')} " if result.get("scope") != "term" else ""
+        term_tag = f"{rec.get('_year', '')}-{rec.get('_term', '')} " if scope != "term" else ""
 
         val_line = f"成績：`{score_display}`\n學分：`{credits}`"
         if cat_txt:
@@ -131,8 +174,17 @@ def build_scores_embed(result: Mapping[str, Any], profile: Mapping[str, Any]) ->
             inline=True,
         )
 
+    footer_parts: list[str] = []
+    if scope == "term" and sem_meta:
+        info = next(iter(sem_meta.values()))
+        if info.get("rank"):
+            footer_parts.append(f"班級名次：{info['rank']}")
+        if info.get("conduct"):
+            footer_parts.append(f"操行成績：{info['conduct']}")
     if len(records) > 18:
-        embed.set_footer(text=f"僅顯示前 18 筆（共 {len(records)} 筆）；完整資料可於 temp_data/ 查看")
+        footer_parts.append(f"僅顯示前 18 筆（共 {len(records)} 筆）")
+    if footer_parts:
+        embed.set_footer(text=" ｜ ".join(footer_parts))
     return embed
 
 
@@ -148,12 +200,20 @@ def build_score_trend_embed(result: Mapping[str, Any], profile: Mapping[str, Any
         f"• **累積實得學分**：`{overall.earned_credits:g}` / `{overall.attempted_credits:g}`",
     ]
     if points:
-        summary_rows = [
-            f"`{p['label']}`：平均 **{p['avg']:.2f}**"
-            + (f"（GPA {p['gpa']:.2f}）" if p.get("gpa") is not None else "")
-            for p in points
-        ]
-        lines.append("\n" + " ｜ ".join(summary_rows))
+        summary_rows = []
+        for p in points:
+            row = f"`{p['label']}`：平均 **{p['avg']:.2f}**"
+            extra: list[str] = []
+            if p.get("gpa") is not None:
+                extra.append(f"GPA {p['gpa']:.2f}")
+            if p.get("conduct"):
+                extra.append(f"操行 {p['conduct']}")
+            if p.get("rank"):
+                extra.append(f"名次 {p['rank']}")
+            if extra:
+                row += f"（{' / '.join(extra)}）"
+            summary_rows.append(row)
+        lines.append("\n" + "\n".join(summary_rows))
 
     embed = discord.Embed(
         title="📈 歷年學期成績平均趨勢折線圖",
@@ -408,6 +468,96 @@ def build_public_courses_embed(result: Mapping[str, Any], page: int = 0, page_si
                 inline=False,
             )
     embed.set_footer(text=f"第 {page + 1}/{total_pages} 頁（共 {len(courses)} 筆）｜免登入公開資料")
+    return embed
+
+
+def build_course_detail_embed(detail: Any, *, show_syllabus: bool = False) -> discord.Embed:
+    """Format /appws/school/getCoursePlanByOpenID/{open_ID} cleanly into Overview or Weekly Syllabus."""
+    item: Mapping[str, Any] = {}
+    if isinstance(detail, list) and detail and isinstance(detail[0], Mapping):
+        item = detail[0]
+    elif isinstance(detail, Mapping):
+        item = detail
+
+    if not item:
+        return discord.Embed(title="📄 課程資訊", description="📭 查無此課程的詳細大綱資料。", color=COLOR_PUBLIC)
+
+    cname = _pick(item, "subj_CNAME", "subj_CN", default="未命名課程")
+    ename = _pick(item, "subj_ENAME", default="")
+    subj_id = _pick(item, "subj_ID", default="-")
+    open_id = _pick(item, "open_ID", default="-")
+    teacher = _pick(item, "emp_CNAME", default="-")
+    dept = _pick(item, "show_CLASS", "divs_CNAME", default="-")
+    must = _pick(item, "must_TXT", default="-")
+    credits = _pick(item, "credits", default="-")
+    if credits.endswith(".0"):
+        credits = credits[:-2]
+    hours = _pick(item, "hours", default="-")
+    if hours.endswith(".0"):
+        hours = hours[:-2]
+    tchtype = _pick(item, "tchtype_TXT", default="")
+    langs = [str(item.get(k) or "").strip() for k in ("lang1", "lang2", "lang3") if str(item.get(k) or "").strip()]
+    lang_str = " / ".join(langs) if langs else "-"
+
+    def _clean(text: Any, limit: int = 950) -> str:
+        s = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        while "\n\n\n" in s:
+            s = s.replace("\n\n\n", "\n\n")
+        return _truncate(s, limit) if s else ""
+
+    if show_syllabus:
+        syllabus = _clean(item.get("syllabus"), 3900)
+        embed = discord.Embed(
+            title=f"📑 每週課程進度 — {cname}",
+            description=syllabus or "📭 授課教師未填寫每週進度。",
+            color=COLOR_PUBLIC,
+        )
+        embed.set_footer(text=f"開課代碼：{open_id} ｜ 授課教師：{teacher}")
+        return embed
+
+    subtitle = f"*{ename}*\n" if ename and ename != "-" else ""
+    header_info = (
+        f"{subtitle}"
+        f"• **授課教師**：`{teacher}`｜**開課單位**：`{dept}`（`{must}`）\n"
+        f"• **學分／時數**：`{credits}` 學分 / `{hours}` 小時｜**授課語言**：`{lang_str}`\n"
+        f"• **科目代碼**：`{subj_id}`｜**開課代碼**：`{open_id}`"
+    )
+    if tchtype and tchtype != "-":
+        header_info += f"\n• **教學方式**：{tchtype}"
+
+    embed = discord.Embed(
+        title=f"📘 {cname}",
+        description=header_info,
+        color=COLOR_PUBLIC,
+    )
+
+    score_way = _clean(item.get("score_WAY"), 950)
+    if score_way:
+        embed.add_field(name="📊 評分方式", value=score_way, inline=False)
+
+    target = _clean(item.get("target"), 950)
+    if target:
+        embed.add_field(name="🎯 教學目標", value=target, inline=False)
+
+    outcomes = _clean(item.get("outcomes"), 950)
+    if outcomes:
+        embed.add_field(name="🎓 學習成效", value=outcomes, inline=False)
+
+    books: list[str] = []
+    mastread = _clean(item.get("mastread"), 450)
+    reference = _clean(item.get("reference"), 450)
+    if mastread:
+        books.append(f"**指定用書**：{mastread}")
+    if reference:
+        books.append(f"**參考教材**：{reference}")
+    if books:
+        embed.add_field(name="📚 教材與參考書目", value="\n".join(books), inline=False)
+
+    othermm = _clean(item.get("othermm"), 400)
+    if othermm:
+        embed.add_field(name="📝 備註", value=othermm, inline=False)
+
+    embed.set_footer(text="點擊下方「📑 檢視每週進度」按鈕可切換查看完整 16 週教學進度")
     return embed
 
 
