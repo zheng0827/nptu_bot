@@ -92,8 +92,25 @@ class MainPanelView(discord.ui.View):
     async def btn_score(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not await self._require_owner(interaction):
             return
-        view = ScoreView(self.requester, self.owner_id, on_back=self.return_to_main, scope="term")
-        await view.render(interaction)
+        await interaction.response.defer()
+        try:
+            semesters = await self.requester.get_semesters()
+            year, term, _ = await self.requester.get_latest_semester()
+            view = ScoreView(
+                self.requester,
+                self.owner_id,
+                semesters=semesters,
+                selected_year=year,
+                selected_term=term,
+                on_back=self.return_to_main,
+                scope="term",
+            )
+            await view.render(interaction)
+        except Exception as exc:
+            await interaction.edit_original_response(
+                embed=discord.Embed(title="❌ 載入成績失敗", description=str(exc), color=0xE74C3C),
+                view=self,
+            )
 
     @discord.ui.button(label="📋 缺曠課", style=discord.ButtonStyle.primary, row=0)
     async def btn_attendance(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:

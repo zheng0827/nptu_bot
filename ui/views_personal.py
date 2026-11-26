@@ -13,6 +13,7 @@ from ui.formatters import (
     build_attendance_stats_embed,
     build_generic_personal_embed,
     build_schedule_embed,
+    build_score_trend_embed,
     build_scores_embed,
 )
 
@@ -162,54 +163,138 @@ class AttendanceView(OwnerGuardView):
 
 
 class ScoreView(OwnerGuardView):
-    """Switch score statistics across 學期 / 學年 / 在學期間 with official NPTU 4.0 GPA."""
+    """Select specific semester or academic year, view full history, or render average trend line chart."""
 
     def __init__(
         self,
         requester: NptuRequester,
         owner_id: int | None,
+        semesters: list[dict[str, Any]] | None = None,
+        selected_year: str | None = None,
+        selected_term: str | None = None,
         on_back: BackCallback | None = None,
         *,
-        scope: ScopeType = "term",
+        scope: ScopeType | str = "term",
     ):
         super().__init__(owner_id)
         self.requester = requester
         self.on_back = on_back
-        self.scope: ScopeType = scope
+        self.semesters = semesters or []
+        self.year = selected_year
+        self.term = selected_term
+        self.scope: str = scope
+
+        # Row 0: Select specific semester (just like ScheduleView)
+        sem_options: list[discord.SelectOption] = []
+        seen_sem: set[tuple[str, str]] = set()
+        for s in self.semesters[:25]:
+            sy = str(s.get("syear") or "").strip()
+            sm = str(s.get("seme") or "").strip()
+            if not sy or not sm or (sy, sm) in seen_sem:
+                continue
+            seen_sem.add((sy, sm))
+            label = str(s.get("syse_TXT") or (f"{sy}學年暑期" if sm == "3" else f"{sy}學年第{sm}學期"))
+            sem_options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=f"{sy}:{sm}",
+                    default=(self.scope == "term" and sy == self.year and sm == self.term),
+                )
+            )
+        if sem_options:
+            self._sem_select = discord.ui.Select(placeholder="選擇指定學期...", options=sem_options, row=0)
+            self._sem_select.callback = self._on_semester_change
+            self.add_item(self._sem_select)
+        else:
+            self._sem_select = None
+
+        # Row 1: Select specific academic year
+        year_options: list[discord.SelectOption] = []
+        seen_years: set[str] = set()
+        for s in self.semesters:
+            sy = str(s.get("syear") or "").strip()
+            if not sy or sy in seen_years:
+                continue
+            seen_years.add(sy)
+            year_options.append(
+                discord.SelectOption(
+                    label=f"{sy} 學年度",
+                    value=sy,
+                    default=(self.scope == "year" and sy == self.year),
+                )
+            )
+            if len(year_options) >= 25:
+                break
+        if year_options:
+            self._year_select = discord.ui.Select(placeholder="選擇指定學年...", options=year_options, row=1)
+            self._year_select.callback = self._on_year_change
+            self.add_item(self._year_select)
+        else:
+            self._year_select = None
+
+    def _sync_select_defaults(self) -> None:
+        if self._sem_select:
+            for opt in self._sem_select.options:
+                opt.default = self.scope == "term" and opt.value == f"{self.year}:{self.term}"
+        if self._year_select:
+            for opt in self._year_select.options:
+                opt.default = self.scope == "year" and opt.value == str(self.year or "")
 
     async def render(self, interaction: discord.Interaction, *, force_refresh: bool = False) -> None:
         if not interaction.response.is_done():
             await interaction.response.defer()
+        self._sync_select_defaults()
         try:
-            res = await self.requester.get_scores(self.scope, force_refresh=force_refresh)
+            if self.scope == "trend":
+                res = await self.requester.get_score_trend(force_refresh=force_refresh)
+                embed = build_score_trend_embed(res, self.requester.get_profile())
+                files = []
+                if res.get("png_bytes"):
+                    files.append(discord.File(io.BytesIO(res["png_bytes"]), filename="score_trend.png"))
+                await interaction.edit_original_response(embed=embed, attachments=files, view=self)
+                return
+
+            res = await self.requester.get_scores(
+                self.scope,  # type: ignore[arg-type]
+                year=self.year if self.scope in {"term", "year"} else None,
+                term=self.term if self.scope == "term" else None,
+                force_refresh=force_refresh,
+            )
             embed = build_scores_embed(res, self.requester.get_profile())
-            await interaction.edit_original_response(embed=embed, view=self, attachments=[])
+            await interaction.edit_original_response(embed=embed, attachments=[], view=self)
         except Exception as exc:
             await interaction.edit_original_response(
                 embed=discord.Embed(title="❌ 查詢成績失敗", description=str(exc), color=0xE74C3C),
+                attachments=[],
                 view=self,
             )
 
-    @discord.ui.button(label="本學期", style=discord.ButtonStyle.primary, row=0)
-    async def btn_term(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    async def _on_semester_change(self, interaction: discord.Interaction) -> None:
+        val = interaction.data["values"][0]
+        self.year, self.term = val.split(":", 1)
         self.scope = "term"
         await self.render(interaction)
 
-    @discord.ui.button(label="本學年", style=discord.ButtonStyle.primary, row=0)
-    async def btn_year(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    async def _on_year_change(self, interaction: discord.Interaction) -> None:
+        self.year = interaction.data["values"][0]
         self.scope = "year"
         await self.render(interaction)
 
-    @discord.ui.button(label="在學期間", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="📊 在學期間總覽", style=discord.ButtonStyle.primary, row=2)
     async def btn_all(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         self.scope = "all"
         await self.render(interaction)
 
-    @discord.ui.button(label="🔄 重新抓取", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="📈 學期平均折線圖", style=discord.ButtonStyle.success, row=2)
+    async def btn_trend(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.scope = "trend"
+        await self.render(interaction)
+
+    @discord.ui.button(label="🔄 重新抓取", style=discord.ButtonStyle.secondary, row=2)
     async def btn_refresh(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await self.render(interaction, force_refresh=True)
 
-    @discord.ui.button(label="🏠 返回主控台", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="🏠 返回主控台", style=discord.ButtonStyle.secondary, row=2)
     async def btn_back(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if self.on_back:
             await self.on_back(interaction)

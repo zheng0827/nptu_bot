@@ -11,6 +11,7 @@ from application.Adapter import ApplicationAdapter
 from core.base_adapter import BaseNptuAdapter, NPTUError, TempDataDumper
 from core.gpa import ScoreSummary, summarize_scores
 from core.schedule_renderer import render_schedule_png
+from core.score_chart_renderer import render_score_trend_png
 from core.storage import BotStorage
 from website.Adapter import WebsiteAdapter
 
@@ -356,6 +357,81 @@ class NptuRequester:
             "semesters": pairs,
             "records": records,
             "summary": summary,
+        }
+
+    async def get_score_trend(
+        self,
+        *,
+        force_refresh: bool = False,
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        """Compute chronological per-semester averages & GPA and render a dark-theme line chart PNG."""
+        adapter = self.get_adapter(source)
+        semesters = await self.get_semesters(force_refresh=force_refresh, source=source)
+        pairs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for s in semesters:
+            y = str(s.get("syear") or "").strip()
+            t = str(s.get("seme") or "").strip()
+            if y and t and (y, t) not in seen:
+                seen.add((y, t))
+                pairs.append((y, t))
+
+        def _sort_key(pair: tuple[str, str]) -> tuple[int, int]:
+            try:
+                return (int(pair[0]), int(pair[1]))
+            except ValueError:
+                return (0, 0)
+
+        pairs.sort(key=_sort_key)
+
+        async def _fetch_one(y: str, t: str) -> tuple[str, str, list[dict[str, Any]]]:
+            rows = await self._cached(
+                f"{adapter.source_name}:scores:{y}:{t}",
+                lambda: adapter.get_scores(y, t),
+                force_refresh=force_refresh,
+            )
+            return y, t, rows
+
+        results = await asyncio.gather(*[_fetch_one(y, t) for y, t in pairs], return_exceptions=True)
+
+        points: list[dict[str, Any]] = []
+        all_records: list[dict[str, Any]] = []
+        for res in results:
+            if isinstance(res, Exception):
+                logger.warning("Failed to fetch semester score for trend: %s", res)
+                continue
+            y, t, rows = res
+            if not rows:
+                continue
+            all_records.extend(rows)
+            sem_summary = summarize_scores(rows)
+            if sem_summary.weighted_score_avg is None:
+                continue
+            label = f"{y}-暑" if t == "3" else f"{y}-{t}"
+            points.append(
+                {
+                    "year": y,
+                    "term": t,
+                    "label": label,
+                    "avg": sem_summary.weighted_score_avg,
+                    "gpa": sem_summary.gpa,
+                    "credits": sem_summary.earned_credits,
+                    "courses": sem_summary.graded_courses,
+                }
+            )
+
+        overall = summarize_scores(all_records)
+        student_name = str((self.get_profile(source) or {}).get("std_CNAME") or "")
+        png_bytes = (
+            await asyncio.to_thread(render_score_trend_png, points, overall, student_name)
+            if points
+            else None
+        )
+        return {
+            "points": points,
+            "overall": overall,
+            "png_bytes": png_bytes,
         }
 
     # =========================================================================

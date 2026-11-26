@@ -114,6 +114,41 @@ def build_scores_embed(result: Mapping[str, Any], profile: Mapping[str, Any]) ->
     return embed
 
 
+def build_score_trend_embed(result: Mapping[str, Any], profile: Mapping[str, Any]) -> discord.Embed:
+    overall: ScoreSummary = result["overall"]
+    points: Sequence[Mapping[str, Any]] = result.get("points") or []
+
+    gpa_text = f"**{overall.gpa:.2f}** / 4.00" if overall.gpa is not None else "-"
+    avg_text = f"**{overall.weighted_score_avg:.2f}**" if overall.weighted_score_avg is not None else "-"
+
+    lines = [
+        f"• **總加權平均**：{avg_text}｜**總 GPA**：{gpa_text}",
+        f"• **累積實得學分**：`{overall.earned_credits:g}` / `{overall.attempted_credits:g}`",
+    ]
+    if points:
+        summary_rows = [
+            f"`{p['label']}`：平均 **{p['avg']:.2f}**"
+            + (f"（GPA {p['gpa']:.2f}）" if p.get("gpa") is not None else "")
+            for p in points
+        ]
+        lines.append("\n" + " ｜ ".join(summary_rows))
+
+    embed = discord.Embed(
+        title="📈 歷年學期成績平均趨勢折線圖",
+        description=_truncate("\n".join(lines), 3900),
+        color=COLOR_PRIMARY,
+    )
+    student_name = _pick(profile, "std_CNAME", default="")
+    if student_name and student_name != "-":
+        embed.set_author(name=student_name)
+    if result.get("png_bytes"):
+        embed.set_image(url="attachment://score_trend.png")
+    else:
+        embed.add_field(name="📭 尚無資料", value="目前沒有已結算的學期成績可繪製折線圖。", inline=False)
+    embed.set_footer(text="僅統計已有結算成績之學期；可透過上方選單切換檢視單一學期或學年明細")
+    return embed
+
+
 def build_attendance_stats_embed(result: Mapping[str, Any]) -> discord.Embed:
     totals: Mapping[str, float] = result.get("totals") or {}
     embed = discord.Embed(

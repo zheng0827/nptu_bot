@@ -22,6 +22,7 @@ from ui.formatters import (
     build_public_courses_embed,
     build_schedule_embed,
     build_score_notify_embed,
+    build_score_trend_embed,
     build_scores_embed,
 )
 from ui.panel import MainPanelView
@@ -175,15 +176,15 @@ class NptuBot(discord.Client):
                     embed=discord.Embed(title="❌ 查詢課表失敗", description=str(exc), color=0xE74C3C)
                 )
 
-        @tree.command(name="score", description="查詢成績統計與屏大 4.0 GPA 等第（僅限擁有者）")
+        @tree.command(name="score", description="查詢成績統計、屏大 4.0 GPA 與歷年平均折線圖（僅限擁有者）")
         @app_commands.describe(
-            scope="統計範圍：term(學期) / year(學年) / all(在學期間)",
-            year="學年（如 114，留空自動抓最新）",
-            term="學期（1 或 2）",
+            scope="模式：term(學期) / year(學年) / all(在學期間) / trend(歷年平均折線圖)",
+            year="學年（如 114，留空自動抓當學期）",
+            term="學期（1 / 2 / 3暑期）",
         )
         async def cmd_score(
             interaction: discord.Interaction,
-            scope: ScopeType = "term",
+            scope: Literal["term", "year", "all", "trend"] = "term",
             year: str | None = None,
             term: str | None = None,
         ) -> None:
@@ -191,9 +192,29 @@ class NptuBot(discord.Client):
                 return
             await interaction.response.defer()
             try:
-                res = await self.requester.get_scores(scope, year, term)
+                semesters = await self.requester.get_semesters()
+                default_y, default_t, _ = await self.requester.get_latest_semester()
+                sel_year = str(year or default_y)
+                sel_term = str(term or default_t)
                 panel = MainPanelView(self.requester, self.owner_id)
-                view = ScoreView(self.requester, self.owner_id, on_back=panel.return_to_main, scope=scope)
+                view = ScoreView(
+                    self.requester,
+                    self.owner_id,
+                    semesters=semesters,
+                    selected_year=sel_year,
+                    selected_term=sel_term,
+                    on_back=panel.return_to_main,
+                    scope=scope,
+                )
+                if scope == "trend":
+                    res = await self.requester.get_score_trend()
+                    embed = build_score_trend_embed(res, self.requester.get_profile())
+                    files = []
+                    if res.get("png_bytes"):
+                        files.append(discord.File(io.BytesIO(res["png_bytes"]), filename="score_trend.png"))
+                    await interaction.followup.send(embed=embed, files=files, view=view)
+                    return
+                res = await self.requester.get_scores(scope, sel_year if scope in {"term", "year"} else None, sel_term if scope == "term" else None)
                 await interaction.followup.send(embed=build_scores_embed(res, self.requester.get_profile()), view=view)
             except Exception as exc:
                 await interaction.followup.send(
