@@ -6,12 +6,19 @@ from typing import Any, Callable, Coroutine
 
 import discord
 
-from application.constants import PHASE_MAP
+from application.constants import (
+    LEAVE_LESSON_NAME_TO_ID,
+    LEAVE_NAME_TO_ID,
+    LEAVE_TYPE_MAP,
+    PHASE_MAP,
+)
 from NptuRequester import AttendanceFilter, NptuRequester, ScopeType
 from ui.formatters import (
     build_attendance_records_embed,
     build_attendance_stats_embed,
     build_generic_personal_embed,
+    build_leave_ask_list_embed,
+    build_leave_basic_data_embed,
     build_schedule_embed,
     build_score_trend_embed,
     build_scores_embed,
@@ -385,6 +392,26 @@ class ScheduleView(OwnerGuardView):
             await interaction.response.defer()
 
 
+def _normalize_excuse_date(raw: str) -> str:
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) != 8:
+        raise ValueError(f"日期格式須為 8 碼西元年月日（YYYYMMDD），收到：{raw!r}")
+    return digits
+
+
+def _normalize_excuse_id(raw: str) -> str:
+    key = raw.strip().upper()
+    return LEAVE_NAME_TO_ID.get(raw.strip(), LEAVE_NAME_TO_ID.get(key, key))
+
+
+def _normalize_lesson_ids(raw: str) -> str:
+    parts = [p.strip().upper() for p in raw.replace("，", ",").split(",") if p.strip()]
+    if not parts:
+        raise ValueError("請至少輸入一個節次（例如：01,02 或 M,N）。")
+    mapped = [LEAVE_LESSON_NAME_TO_ID.get(p, p) for p in parts]
+    return ",".join(mapped)
+
+
 class LeaveConfirmView(OwnerGuardView):
     """Explicit confirmation step before calling mutating askLeave endpoint."""
 
@@ -408,7 +435,30 @@ class LeaveConfirmView(OwnerGuardView):
                 excuse_id=self.payload["excuse_id"],
                 reason=self.payload["reason"],
             )
-            embed = build_generic_personal_embed("✅ 請假申請已送出", res, "無回應內容")
+            if isinstance(res, dict) and res.get("result") is False:
+                data = res.get("data") if isinstance(res.get("data"), dict) else {}
+                code = data.get("errorCode", "unknown")
+                desc = data.get("errorDescription") or res.get("reason") or "請假申請遭伺服器拒絕"
+                embed = discord.Embed(
+                    title="❌ 請假申請失敗",
+                    description=f"錯誤代碼：`{code}`\n說明：{desc}",
+                    color=0xE74C3C,
+                )
+                embed.set_footer(text="詳細回應已存至 temp_data/")
+                await interaction.edit_original_response(embed=embed, view=None)
+                return
+
+            embed = discord.Embed(
+                title="✅ 請假申請已送出成功",
+                description=(
+                    f"• **日期**：`{self.payload['excuse_date']}`\n"
+                    f"• **節次代碼**：`{self.payload['lesson_ids']}`\n"
+                    f"• **假別**：`{LEAVE_TYPE_MAP.get(self.payload['excuse_id'], self.payload['excuse_id'])}`\n"
+                    f"• **事由**：{self.payload['reason']}"
+                ),
+                color=0x2ECC71,
+            )
+            embed.set_footer(text="詳細回應已存至 temp_data/")
             await interaction.edit_original_response(embed=embed, view=None)
         except Exception as exc:
             await interaction.edit_original_response(
@@ -425,10 +475,27 @@ class LeaveConfirmView(OwnerGuardView):
 
 
 class LeaveApplyModal(discord.ui.Modal, title="📝 填寫屏大請假申請"):
-    excuse_date = discord.ui.TextInput(label="請假日期 (YYYY/MM/DD 或系統格式)", placeholder="例如：2026/11/25", required=True)
-    lesson_ids = discord.ui.TextInput(label="節次代碼 (多節以逗號分隔)", placeholder="例如：01,02 或 03", required=True)
-    excuse_id = discord.ui.TextInput(label="假別代碼 (可先點「假別代碼」查詢)", placeholder="例如：01 (事假) / 02 (病假)", required=True)
-    reason = discord.ui.TextInput(label="請假事由", style=discord.TextStyle.paragraph, placeholder="請簡述請假原因...", required=True)
+    excuse_date = discord.ui.TextInput(
+        label="請假日期 (YYYYMMDD 或 YYYY/MM/DD)",
+        placeholder="例如：20261125（系統會自動轉為 8 碼）",
+        required=True,
+    )
+    lesson_ids = discord.ui.TextInput(
+        label="請假節次 (輸入節次名稱或代碼，逗號分隔)",
+        placeholder="例如：01,02 或 M,N,09,A（自動轉系統代碼）",
+        required=True,
+    )
+    excuse_id = discord.ui.TextInput(
+        label="假別 (輸入中文或代碼：B事假 / C病假 / J生理假)",
+        placeholder="例如：事假 / 病假 / 生理假 或 B / C / J",
+        required=True,
+    )
+    reason = discord.ui.TextInput(
+        label="請假事由",
+        style=discord.TextStyle.paragraph,
+        placeholder="請簡述請假原因...",
+        required=True,
+    )
 
     def __init__(self, requester: NptuRequester, owner_id: int | None):
         super().__init__()
@@ -436,18 +503,27 @@ class LeaveApplyModal(discord.ui.Modal, title="📝 填寫屏大請假申請"):
         self.owner_id = owner_id
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        try:
+            norm_date = _normalize_excuse_date(str(self.excuse_date.value))
+            norm_lessons = _normalize_lesson_ids(str(self.lesson_ids.value))
+            norm_excuse = _normalize_excuse_id(str(self.excuse_id.value))
+        except ValueError as exc:
+            await interaction.response.send_message(f"⚠️ 輸入格式有誤：{exc}", ephemeral=True)
+            return
+
         payload = {
-            "excuse_date": str(self.excuse_date.value).strip(),
-            "lesson_ids": str(self.lesson_ids.value).strip(),
-            "excuse_id": str(self.excuse_id.value).strip(),
+            "excuse_date": norm_date,
+            "lesson_ids": norm_lessons,
+            "excuse_id": norm_excuse,
             "reason": str(self.reason.value).strip(),
         }
+        excuse_label = LEAVE_TYPE_MAP.get(norm_excuse, norm_excuse)
         embed = discord.Embed(
             title="⚠️ 請確認請假申請內容",
             description=(
-                f"• **日期**：`{payload['excuse_date']}`\n"
-                f"• **節次**：`{payload['lesson_ids']}`\n"
-                f"• **假別代碼**：`{payload['excuse_id']}`\n"
+                f"• **日期**：`{norm_date}`\n"
+                f"• **節次（已轉系統代碼）**：`{self.lesson_ids.value.strip()}` → `{norm_lessons}`\n"
+                f"• **假別**：`{excuse_label}` (`{norm_excuse}`)\n"
                 f"• **事由**：{payload['reason']}"
             ),
             color=0xF39C12,
@@ -460,7 +536,7 @@ class LeaveApplyModal(discord.ui.Modal, title="📝 填寫屏大請假申請"):
 
 
 class LeaveView(OwnerGuardView):
-    """Leave management hub: Query records, view askable slots, view leave codes, submit application."""
+    """Leave management hub: Query records, view ask list, view leave codes, submit application."""
 
     def __init__(
         self,
@@ -484,16 +560,16 @@ class LeaveView(OwnerGuardView):
                 view=self,
             )
 
-    @discord.ui.button(label="🗓️ 可請假節次", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="🗓️ 線上請假單", style=discord.ButtonStyle.secondary, row=0)
     async def btn_ask_list(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         await interaction.response.defer()
         try:
             rows = await self.requester.get_leave_ask_list()
-            embed = build_generic_personal_embed("🗓️ 目前可申請請假節次", rows, "目前沒有可請假的節次紀錄。")
+            embed = build_leave_ask_list_embed(rows)
             await interaction.edit_original_response(embed=embed, view=self, attachments=[])
         except Exception as exc:
             await interaction.edit_original_response(
-                embed=discord.Embed(title="❌ 取得可請假節次失敗", description=str(exc), color=0xE74C3C),
+                embed=discord.Embed(title="❌ 取得線上請假單失敗", description=str(exc), color=0xE74C3C),
                 view=self,
             )
 
@@ -502,7 +578,7 @@ class LeaveView(OwnerGuardView):
         await interaction.response.defer()
         try:
             data = await self.requester.get_leave_basic_data()
-            embed = build_generic_personal_embed("📖 屏大假別基本代碼表", data, "查無假別代碼資料。")
+            embed = build_leave_basic_data_embed(data)
             await interaction.edit_original_response(embed=embed, view=self, attachments=[])
         except Exception as exc:
             await interaction.edit_original_response(

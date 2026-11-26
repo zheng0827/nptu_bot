@@ -69,6 +69,59 @@ LIBRARY_QUERY_TYPES: dict[str, str] = {
     "isbn": "ISBN",
 }
 
+# Verified against /appws/school/getLeaveBasicData & /appws/student/getStudentLeaveListForAsk
+LEAVE_TYPE_MAP: dict[str, str] = {
+    "B": "事假",
+    "C": "病假",
+    "F": "公假",
+    "J": "生理假",
+}
+
+LEAVE_NAME_TO_ID: dict[str, str] = {
+    "事假": "B",
+    "病假": "C",
+    "公假": "F",
+    "生理假": "J",
+    "B": "B",
+    "C": "C",
+    "F": "F",
+    "J": "J",
+}
+
+# Map human-readable lesson names (e.g. "M", "01", "09", "A"~"D") to NPTU askLeave LESSON_ID
+LEAVE_LESSON_NAME_TO_ID: dict[str, str] = {
+    "M": "78",
+    "01": "1",
+    "1": "1",
+    "02": "2",
+    "2": "2",
+    "03": "3",
+    "3": "3",
+    "04": "4",
+    "4": "4",
+    "N": "45",
+    "05": "5",
+    "5": "5",
+    "06": "6",
+    "6": "6",
+    "07": "7",
+    "7": "7",
+    "08": "8",
+    "8": "8",
+    "09": "89",
+    "9": "89",
+    "A": "9",
+    "B": "10",
+    "C": "11",
+    "D": "12",
+    "78": "78",
+    "45": "45",
+    "89": "89",
+    "10": "10",
+    "11": "11",
+    "12": "12",
+}
+
 ENCRYPTED_STUDENT_ENDPOINTS: set[str] = {
     "student_semesters",
     "student_courses",

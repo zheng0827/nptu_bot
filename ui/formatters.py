@@ -219,6 +219,83 @@ def build_schedule_embed(result: Mapping[str, Any], profile: Mapping[str, Any]) 
     return embed
 
 
+def build_leave_basic_data_embed(data: Any) -> discord.Embed:
+    """Format /appws/school/getLeaveBasicData cleanly into leave types & lesson ID tables."""
+    embed = discord.Embed(title="📖 屏大假別與節次代碼表", color=COLOR_PRIMARY)
+    if not isinstance(data, Mapping):
+        embed.description = "📭 查無假別基本代碼資料。"
+        return embed
+
+    leave_types = data.get("leaveTypeList") or []
+    if leave_types:
+        lt_lines = [
+            f"• **`{item.get('EXCUSE_ID', '-')}`** — {item.get('EXCUSE_ID_TXT', '-')}"
+            for item in leave_types
+            if isinstance(item, Mapping)
+        ]
+        embed.add_field(
+            name="🏷️ 可線上申請假別（輸入代碼或中文皆可）",
+            value="\n".join(lt_lines),
+            inline=False,
+        )
+
+    lessons = data.get("lessonList") or []
+    if lessons:
+        ls_lines = []
+        for item in lessons:
+            if not isinstance(item, Mapping):
+                continue
+            cname = str(item.get("LESSON_CNAME") or "").strip()
+            lid = str(item.get("LESSON_ID") or "").strip()
+            btime = str(item.get("BTIME") or "").strip()
+            etime = str(item.get("ETIME") or "").strip()
+            if not lid:
+                continue
+            ls_lines.append(f"`{cname:>2}` ({btime}-{etime}) → 代碼 `{lid}`")
+        # Split into 2 columns for readability
+        mid = (len(ls_lines) + 1) // 2
+        embed.add_field(name="🕒 節次對照（上午／中午）", value="\n".join(ls_lines[:mid]) or "-", inline=True)
+        embed.add_field(name="🕒 節次對照（下午／夜間）", value="\n".join(ls_lines[mid:]) or "-", inline=True)
+
+    embed.set_footer(text="申請請假時可直接輸入節次名稱（如 01,02 或 M,N）或假別中文（事假/病假/生理假），系統會自動轉換代碼")
+    return embed
+
+
+def build_leave_ask_list_embed(rows: Sequence[Mapping[str, Any]]) -> discord.Embed:
+    """Format /appws/student/getStudentLeaveListForAsk records cleanly."""
+    from application.constants import LEAVE_TYPE_MAP
+
+    embed = discord.Embed(title="📝 線上請假單紀錄", color=COLOR_PRIMARY)
+    if not rows:
+        embed.description = "📭 目前沒有線上請假單紀錄。"
+        return embed
+
+    lines: list[str] = []
+    for idx, rec in enumerate(rows[:15], 1):
+        raw_dt = _pick(rec, "excuse_DT", "EXCUSE_DT", default="-")
+        dt_fmt = f"{raw_dt[:4]}/{raw_dt[4:6]}/{raw_dt[6:8]}" if len(raw_dt) == 8 and raw_dt.isdigit() else raw_dt
+        excuse_id = _pick(rec, "excuse_ID", "EXCUSE_ID", default="-")
+        excuse_name = LEAVE_TYPE_MAP.get(excuse_id.upper(), excuse_id)
+        sy = _pick(rec, "syear", default="")
+        sm = _pick(rec, "seme", default="")
+        reason = _pick(rec, "reason", "REASON", default="-")
+        lesson = _pick(rec, "lesson_ID", "LESSON_ID", default="")
+        status = _pick(rec, "status_TXT", "STATUS_TXT", "verify_TXT", default="")
+
+        header = f"**{idx}.** `{dt_fmt}`｜**{excuse_name}** (`{excuse_id}`)"
+        if sy != "-" and sm != "-":
+            header += f"｜{sy}-{sm}"
+        if lesson and lesson != "-":
+            header += f"｜節次 `{lesson}`"
+        if status and status != "-":
+            header += f"｜狀態：{status}"
+        lines.append(f"{header}\n　事由：{_truncate(reason, 90)}")
+
+    embed.description = _truncate("\n".join(lines), 3900)
+    embed.set_footer(text=f"共 {len(rows)} 筆｜原始 JSON 已存至 temp_data/")
+    return embed
+
+
 def build_generic_personal_embed(title: str, data: Any, empty_msg: str) -> discord.Embed:
     embed = discord.Embed(title=title, color=COLOR_PRIMARY)
     if not data:
